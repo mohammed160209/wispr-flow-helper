@@ -15,6 +15,7 @@ mod backend;
 mod capture;
 mod keymap;
 mod proto;
+mod system_audio;
 
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
@@ -73,6 +74,11 @@ fn main() {
     // helper (it passes no arguments).
     if std::env::args().any(|a| a == "--version") {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    if std::env::args().any(|a| a == "--capture-system-audio") {
+        system_audio::run_capture_system_audio();
         return;
     }
 

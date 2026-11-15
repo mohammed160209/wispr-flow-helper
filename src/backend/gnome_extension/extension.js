@@ -136,8 +136,8 @@ const CAN_SET_TYPE = typeof Meta.Window.prototype.set_type === 'function';
 // wl-clipboard's surface, which then waits for focus forever and hangs copy
 // and paste. Keep the pill above only while its window is no bigger than
 // this; linux-status-compact.sh in the app repo makes it 200x110.
-const STATUS_ABOVE_MAX_WIDTH = 256;
-const STATUS_ABOVE_MAX_HEIGHT = 160;
+const STATUS_ABOVE_MAX_WIDTH = 1600;
+const STATUS_ABOVE_MAX_HEIGHT = 1600;
 
 // Re-snap tolerance: skip re-positioning if we're already within this many
 // pixels of the target, so our own `position-changed` handler doesn't loop
@@ -185,7 +185,7 @@ function bottomDockHeight(monitor) {
 
 // The status renderer publishes the pill's painted bounding box in its title
 // as "Status|x,y,w,h" (see the linux-status-shape patch in the app repo).
-const STATUS_TITLE_RE = /^Status(?:\|(-?\d+),(-?\d+),(\d+),(\d+))?$/;
+const STATUS_TITLE_RE = /^(?:Status(?:\|(-?\d+),(-?\d+),(\d+),(\d+))?|Flow Status Indicator)$/;
 
 function isStatusTitle(title) {
     return STATUS_TITLE_RE.test(title ?? '');
@@ -470,8 +470,10 @@ export default class WindowBridgeExtension extends Extension {
             // inside at pill-relative coordinates; it only lines up if the
             // window sits exactly at the work-area origin, which Wayland won't
             // let the app enforce itself.
+            const isX11 = win.get_client_type?.() === Meta.WindowClientType?.X11;
             const title = win.get_title() ?? '';
-            if ((title === 'Context Menu' || title === 'Flow Context Menu') &&
+            if (!isX11 &&
+                (title === 'Context Menu' || title === 'Flow Context Menu') &&
                 !this._statusWired.has(win)) {
                 this._statusWired.add(win);
                 const pin = () => {
@@ -486,7 +488,7 @@ export default class WindowBridgeExtension extends Extension {
                 this._connectWin(win, 'position-changed', pin);
                 this._connectWin(win, 'size-changed', pin);
             }
-            if (isStatusTitle(win.get_title()) && !this._statusWired.has(win)) {
+            if (!isX11 && isStatusTitle(win.get_title()) && !this._statusWired.has(win)) {
                 this._statusWired.add(win);
                 this._pinStatusBottomCenter(win);
                 this._connectWin(win, 'position-changed', () =>
@@ -524,8 +526,15 @@ export default class WindowBridgeExtension extends Extension {
     _updateStatusAbove(win) {
         try {
             const saved = this._auxSaved.get(win);
-            // Gone, retitled as a real window, or above on its own already.
-            if (!saved || saved.above)
+            // Gone or retitled as a real window.
+            if (!saved)
+                return;
+            if (win.get_client_type?.() === Meta.WindowClientType?.X11) {
+                if (!win.is_above())
+                    win.make_above();
+                return;
+            }
+            if (saved.above)
                 return;
             const {width, height} = win.get_frame_rect();
             const small = width <= STATUS_ABOVE_MAX_WIDTH &&

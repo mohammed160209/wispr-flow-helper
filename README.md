@@ -1,143 +1,100 @@
 # wispr-flow-linux-helper
 
-> Standalone repo (`github.com/wispr-flow-linux/helper`), split out of the
-> `wispr-flow-linux` monorepo. Tagged `v*` releases publish prebuilt
-> `wispr-flow-linux-helper-x86_64` and `wispr-flow-linux-helper-aarch64`
-> binaries as Release assets, which the main `wispr-flow-linux` package build
-> downloads instead of compiling the helper itself.
+> Clean-room native Rust companion binary (`wispr-flow-linux-helper`) and GNOME Shell window bridge extension for **Wispr Flow on Linux** — maintained as part of [`mohammed160209/wispr-flow-linux`](https://github.com/mohammed160209/wispr-flow-linux).
 
-Clean-room Linux helper for Wispr Flow. It is a standalone process that speaks the
-helper IPC contract the Wispr Flow Electron app already uses for its macOS (Swift)
-and Windows (C#) helpers, and backs the OS-integration commands with **X11 and
-Wayland** backends. The app ships no Linux helper; this fills that gap.
+Wispr Flow's upstream Windows and macOS releases delegate OS-level hooks to a small native helper process. This repository implements that exact binary for **Arch Linux / CachyOS, Ubuntu/Debian, Fedora**, and other modern Linux desktops, plus **native PipeWire system audio capture** so Notetaker meetings work cleanly without spawning heavy external recorders.
 
-The Wayland backend injects via an **in-process `/dev/uinput` virtual keyboard**
-(no `ydotoold` daemon, no root — just `/dev/uinput` write access from the logind
-`uaccess` ACL) + `wl-clipboard`. **`PasteText` is live-validated** inserting text
-into a focused native KDE Plasma Wayland app.
+---
 
-**Contract is the source of truth:**
-[`docs/reference/ipc-contract.md`](https://github.com/wispr-flow-linux/wispr-flow-linux/blob/main/docs/reference/ipc-contract.md)
-(+ `keycodes.json`, `commands.json`), kept in the main `wispr-flow-linux` repo.
-Recovered directly from the shipped Electron bundle — not guessed.
+## Core Capabilities
 
-## What works
+| Subsystem | Implementation | Platforms / Compositors |
+| :--- | :--- | :--- |
+| **PipeWire System Audio (`--capture-system-audio`)** | In-process `dlopen("libpulse-simple.so.0")` capturing `@DEFAULT_MONITOR@` at `16 kHz` mono `s16le` (`1280`-byte / `40 ms` fragments) wrapped in `1,304`-byte `WAF2` frames over `stdout` + `endpoint_opened` on `stderr` | PipeWire (`pipewire-pulse`), PulseAudio |
+| **Notetaker Input Modes** | Reads `$XDG_CONFIG_HOME/Wispr Flow/notetaker-input-mode.json` live (`both`, `system_only`, `mic_only`) & reconnects automatically if the active output sink changes (speakers → headphones/Bluetooth) | Any Linux PipeWire setup |
+| **Global Keystroke Injection (`PasteText`, `SimulateKeyPress`)** | In-process `/dev/uinput` virtual keyboard + `wl-clipboard` on Wayland; `XTEST` + `xclip`/`xsel` on X11 | Wayland (GNOME, KDE, wlroots/Hyprland/Sway) & X11 |
+| **Global Hotkey Monitor** | `/dev/input/event*` evdev listener on Wayland, `XInput2` on X11 | Wayland & X11 |
+| **Active Window Context (`GetActiveAppInfo`)** | Bundled GNOME Shell ESM extension ([`wispr-flow-window-bridge@wispr.flow`](src/backend/gnome_extension/extension.js)) over D-Bus; KDE KWin script bridge over D-Bus; `_NET_ACTIVE_WINDOW` on X11 | GNOME 45–50+, KDE Plasma, X11 |
+| **Floating Pill Stacking & Clipping Fixes** | Keeps `Status` / `Flow Status Indicator` overlays (`_NET_WM_WINDOW_TYPE` / `Meta.WindowType.UTILITY`) above fullscreen/focused windows up to `1600x1600` (`512x614` @ HiDPI) with Dash to Dock `intellihide-ignore-wispr-overlay` compatibility | GNOME Mutter (Wayland & XWayland) |
 
-| Command | X11 backend | Wayland backend |
-|---|---|---|
-| `IsReady` → `ACK` | ✅ handshake + keepalive | ✅ |
-| `PasteText` | ✅ clipboard (`xclip`/`xsel`) + XTEST Ctrl+V | ✅ **live-validated** — in-process text/plain+text/html clipboard + uinput Ctrl+V |
-| `SimulateKeyPress` | ✅ VK→keysym→keycode + XTEST | ✅ VK→evdev + uinput chord |
-| `GetActiveAppInfo` / `GetAppInfo` | ✅ `_NET_ACTIVE_WINDOW`→PID/`WM_CLASS` | ✅ **KDE** via KWin script bridge; ⬜ other compositors |
-| `GetRunningApps` | ✅ `_NET_CLIENT_LIST` | ⚠️ KDE: active app only (full list TBD); ⬜ other |
-| `SetFocusChangeDetectorState` → `AppInfoUpdate` | ⬜ (TODO: `PropertyNotify`) | ✅ **KDE** — focus events on fd 3, gated & deduped |
-| `GetSelectedTextViaCopy` | ⚠️ Ctrl+C copy-probe | ⚠️ Ctrl+C copy-probe |
-| `GetAccessibilityStatus` | ✅ (connection live) | ✅ (uinput live) |
-| everything else (intervals/BLE/panel/analytics…) | ACK no-op | ACK no-op |
+---
 
-`detect()` picks Wayland when `$WAYLAND_DISPLAY` is set and `/dev/uinput` is
-writable, else X11 (`$DISPLAY`), else a no-op stub.
+## PipeWire System Audio Capture (`--capture-system-audio`)
 
-Design choice: unhandled commands are ACK'd as safe no-ops so the unmodified app
-stays healthy instead of relaunch-looping the helper. See `src/main.rs` dispatch.
+Upstream Wispr Flow Notetaker expects Windows' native `WASAPI` loopback helper framing (`endpoint_opened` on `stderr`, followed by continuous `WAF2` packets on `stdout`). On Linux, [`src/system_audio.rs`](src/system_audio.rs) satisfies that contract with zero extra child processes:
 
-## Build
+```text
+[PipeWire Default Sink Monitor (@DEFAULT_MONITOR@)]
+        │  16 kHz · mono · s16le · 40 ms (1280 B)
+        ▼
+[wispr-flow-linux-helper --capture-system-audio]
+        │  header: "WAF2" + len(1280) + seq(u64) + ticks_100ns(i64)
+        ▼  stdout (1304-byte frames)
+[Wispr Flow Electron Notetaker Engine]  ◄── mixed in parallel with Microphone
+```
 
-Needs a Rust toolchain (not currently installed on this machine):
+You can test the standalone PipeWire capture stream directly at any time:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # if needed
-cargo build            # debug
-cargo build --release  # single stripped binary -> target/release/wispr-flow-linux-helper
-cargo test             # framing roundtrip + decoder tests (proto.rs)
+(sleep 1.5) | ./target/release/wispr-flow-linux-helper --capture-system-audio > /tmp/waf2.bin
+# stderr prints: endpoint_opened
+# /tmp/waf2.bin contains exact 1,304-byte WAF2 frames
 ```
 
-`x11rb` is pure-Rust (speaks the X11 wire protocol over the socket), so no
-`libxcb`/`libX11` dev headers are required. For the clipboard baseline, install
-`xclip` (or `xsel`). XTEST must be enabled on the X server (it is by default).
+---
 
-## Test without the full app
+## Building From Source
 
-`test_harness.py` mimics Electron's spawn (4 stdio pipes: commands on stdin,
-events on **fd 3**) and runs a scripted conversation:
+### Requirements
+- **Rust toolchain** (`rustup` or Arch `rust` package)
+- Runtime libraries only (no extra `-dev` C headers required thanks to pure-Rust `x11rb`/`zbus` and runtime `dlopen` for `libpulse-simple.so.0`):
+  - **Arch Linux / CachyOS:** `sudo pacman -S --needed pipewire pipewire-pulse wl-clipboard xclip`
+  - **Debian / Ubuntu:** `sudo apt install pipewire-pulse libpulse0 wl-clipboard xclip`
+  - **Fedora:** `sudo dnf install pipewire-pulseaudio pipewire-libs wl-clipboard xclip`
+
+### Build & Test
 
 ```bash
-cargo build
-python3 test_harness.py            # uses ./target/debug/wispr-flow-linux-helper
-RUST_LOG=debug python3 test_harness.py ./target/release/wispr-flow-linux-helper
+git clone https://github.com/mohammed160209/wispr-flow-helper.git
+cd wispr-flow-helper
+
+cargo test
+cargo build --release
+# Output binary: target/release/wispr-flow-linux-helper
 ```
 
-Expected: an `ACK` for `IsReady`, an `ActiveAppInfo` for the focused window, a
-`RunningApps` list, and an `AccessibilityStatus`. (PasteText/SimulateKeyPress are
-commented out in the harness because they inject into the focused window.)
+### Pairing with `wispr-flow-linux`
 
-**Live injection test** (`live_inject_test.py`) exercises the real PasteText +
-chord path against a focused editor:
+Either let [`wispr-flow-linux`](https://github.com/mohammed160209/wispr-flow-linux) fetch the pinned release asset automatically, or pass your freshly compiled binary directly:
 
 ```bash
-# launches its own kate:
-python3 live_inject_test.py target/release/wispr-flow-linux-helper
-# or inject into whatever you already have focused (keep it focused ~5s):
-python3 live_inject_test.py target/release/wispr-flow-linux-helper none
+HELPER_BIN="$PWD/target/release/wispr-flow-linux-helper" \
+  ../wispr-flow-linux/scripts/build-linux.sh
 ```
 
-It PasteTexts a marker, overwrites the clipboard with a sentinel, then Ctrl+A/Ctrl+C
-to read the editor back. The automated readback has a clipboard-owner race that can
-report a false negative — the paste landing is verifiable by eye in the editor.
+---
 
-## Wiring into the app (Phase 0 packaging)
+## Repository Structure
 
-One mandatory patch to the unmodified Electron main bundle: the helper-path
-resolver is a two-way `isMac ? mac : windows` switch with **no Linux case**
-(ipc-contract.md §8). Add a `'linux'` branch pointing at this binary, staged
-under `resources/Release/` (or wherever the Linux build places it), and spawn it
-with `stdio:["pipe","pipe","pipe","pipe"]` (the app already does this).
-
-## Layout
-
-```
+```text
 src/
-  main.rs            entry: stdin reader, fd3 writer, dispatch, IsReady/ACK
-  proto.rs           envelope + framing (escape '+'/'|', delimiter '|') + tests
-  keymap.rs          Windows VK -> X11 keysym AND -> Linux evdev KEY_* (from keycodes.json)
-  backend/
-    mod.rs           Backend trait + types + detect() (Wayland > X11 > stub)
-    x11.rs           X11 implementation (XTEST + _NET_* + xclip/xsel)
-    wayland.rs       Wayland implementation (uinput injection + clipboard + KWin)
-    uinput.rs        in-process /dev/uinput virtual keyboard
-    wl_clipboard.rs  in-process text/plain+text/html clipboard (ext_data_control)
-    kwin.rs          KDE active-window bridge + focus-event source (zbus + KWin script)
-    stub.rs          no-op fallback (keeps handshake alive on unsupported sessions)
-test_harness.py      Electron stand-in: scripted handshake/info conversation
-live_inject_test.py  live PasteText + Ctrl+A/Ctrl+C round-trip against a focused editor
-focus_test.py        focus-event (AppInfoUpdate) streaming + SetFocusChangeDetectorState gating
-clipboard_test.py    in-process clipboard offers text/plain + text/html
+├── main.rs                      # CLI flags (--capture-system-audio, IPC dispatcher)
+├── system_audio.rs              # In-process PipeWire/PulseAudio WAF2 monitor capture
+├── proto.rs                     # Framed pipe IPC protocol (stdin commands / fd 3 events)
+├── keymap.rs                    # Windows VK -> X11 keysym / Linux evdev mappings
+├── capture/                     # Global hotkey readers (evdev, XInput2)
+└── backend/
+    ├── mod.rs                   # Runtime compositor detection (Wayland / X11 / GNOME / KDE)
+    ├── gnome.rs                 # GNOME Shell extension auto-installer & D-Bus bridge client
+    ├── gnome_extension/         # Bundled GNOME 45–50+ Window Bridge extension.js
+    ├── kwin.rs                  # KDE Plasma active-window D-Bus bridge
+    ├── uinput.rs                # In-process /dev/uinput virtual keyboard injector
+    ├── wl_clipboard.rs          # Native Wayland clipboard handler
+    └── x11.rs                   # X11 / XTEST backend
 ```
 
-## Roadmap (next, in priority order)
+---
 
-1. ✅ **KDE active-app identity + focus events** — done (`backend/kwin.rs`): KWin
-   script pushes `windowActivated` → zbus service → cache + `AppInfoUpdate` events
-   on fd 3 (gated by `SetFocusChangeDetectorState`).
-2. ❌ **Held-modifier snapshot/restore** (Wayland) — removed; not achievable from
-   a uinput device (the release is dropped by the kernel, the restore strands the
-   modifier). Neutralising a physically-held modifier would need `EVIOCGRAB` on
-   the real device, or deferring the chord until the user lets go.
-3. ✅ **text/plain + text/html clipboard** (Wayland) — done (`backend/wl_clipboard.rs`,
-   `ext_data_control`). TODO: X11 in-process selection owner; prior-clipboard
-   save/restore (read side still uses `wl-paste`).
-4. **Full `GetRunningApps` on KDE** — walk `workspace.windowList` in the KWin script.
-   **GNOME path** — shell-extension equivalent of the KWin bridge.
-5. **AT-SPI selection** — replace the copy-probe with real `atspi` Text-interface
-   reads (`GetSelectedTextViaCopy` without synthetic Ctrl+C). Both backends.
-6. **Focus tracking on X11** — `PropertyNotify` on `_NET_ACTIVE_WINDOW` → `AppInfoUpdate`.
-7. **codingCliAgent detection** — terminal + running-process heuristics for the
-   `ActiveAppInfo.codingCliAgent` enum.
+## License & Attribution
 
-## Legal
-
-Clean-room reimplementation against a recovered IPC contract; ships no Wispr Flow
-proprietary code, and is released into the public domain under the
-[Unlicense](UNLICENSE). The app itself remains under its own terms — see the
-[legal posture](https://github.com/wispr-flow-linux/wispr-flow-linux#legal-posture)
-in the main repo.
+Released into the public domain under the [Unlicense](UNLICENSE). Originally forked from [wispr-flow-linux/helper](https://github.com/wispr-flow-linux/helper) and actively maintained by [Mohammed Sakarwala](https://github.com/mohammed160209) with PipeWire Notetaker loopback capture and GNOME/XWayland overlay improvements.

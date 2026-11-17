@@ -35,6 +35,10 @@ const IFACE_XML = `
     <method name="GetWindowList">
       <arg type="s" direction="out" name="json"/>
     </method>
+    <method name="ActivateWindow">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="b" direction="out" name="activated"/>
+    </method>
     <signal name="FocusChanged">
       <arg type="s" name="json"/>
     </signal>
@@ -112,7 +116,7 @@ function windowInfo(win) {
 // 1.6.1264, `Wispr Flow` since) and `Scratchpad` are the only Wispr Flow
 // windows meant to be real, user-facing taskbar entries.
 const WISPR_WM_CLASS = 'wispr-flow';
-const WISPR_TASKBAR_TITLES = new Set(['Hub', 'Wispr Flow', 'Scratchpad']);
+const WISPR_TASKBAR_TITLES = new Set(['Hub', 'Wispr Flow', 'Scratchpad', 'Meeting Recorder']);
 
 // Mutter made hide_from_window_list(), show_in_window_list() and set_type()
 // public on Meta.Window only in 49. GNOME 45-48 have none of them, so there
@@ -729,5 +733,28 @@ export default class WindowBridgeExtension extends Extension {
             out.push(info);
         }
         return JSON.stringify(out);
+    }
+
+    // D-Bus method: move a named Wispr Flow normal window (e.g. "Meeting Recorder")
+    // to the active workspace, unminimize it, and raise/focus it on top of all windows.
+    ActivateWindow(title) {
+        try {
+            const ws = global.workspace_manager.get_active_workspace();
+            const time = global.get_current_time();
+            for (const actor of global.get_window_actors()) {
+                const win = actor.meta_window;
+                if (!win || win.get_wm_class() !== WISPR_WM_CLASS)
+                    continue;
+                if ((win.get_title() ?? '') !== title)
+                    continue;
+                if (win.minimized)
+                    win.unminimize();
+                if (!win.is_on_all_workspaces() && win.get_workspace() !== ws)
+                    win.change_workspace(ws);
+                Main.activateWindow(win, time);
+                return true;
+            }
+        } catch (e) {}
+        return false;
     }
 }

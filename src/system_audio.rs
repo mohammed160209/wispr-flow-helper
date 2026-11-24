@@ -81,13 +81,13 @@ struct PulseSimpleApi {
 
 impl PulseSimpleApi {
     unsafe fn load() -> Result<Self, String> {
-        let candidates = [
-            "libpulse-simple.so.0\0",
-            "libpulse-simple.so\0",
-        ];
+        let candidates = ["libpulse-simple.so.0\0", "libpulse-simple.so\0"];
         let mut handle: *mut c_void = std::ptr::null_mut();
         for name in &candidates {
-            handle = libc::dlopen(name.as_ptr() as *const c_char, libc::RTLD_NOW | libc::RTLD_LOCAL);
+            handle = libc::dlopen(
+                name.as_ptr() as *const c_char,
+                libc::RTLD_NOW | libc::RTLD_LOCAL,
+            );
             if !handle.is_null() {
                 break;
             }
@@ -96,9 +96,9 @@ impl PulseSimpleApi {
             return Err("libpulse-simple.so.0 not found".to_string());
         }
 
-        let sym_new = libc::dlsym(handle, b"pa_simple_new\0".as_ptr() as *const c_char);
-        let sym_read = libc::dlsym(handle, b"pa_simple_read\0".as_ptr() as *const c_char);
-        let sym_free = libc::dlsym(handle, b"pa_simple_free\0".as_ptr() as *const c_char);
+        let sym_new = libc::dlsym(handle, c"pa_simple_new".as_ptr());
+        let sym_read = libc::dlsym(handle, c"pa_simple_read".as_ptr());
+        let sym_free = libc::dlsym(handle, c"pa_simple_free".as_ptr());
 
         if sym_new.is_null() || sym_read.is_null() || sym_free.is_null() {
             libc::dlclose(handle);
@@ -107,13 +107,14 @@ impl PulseSimpleApi {
 
         Ok(Self {
             _lib: handle,
-            simple_new: std::mem::transmute(sym_new),
-            simple_read: std::mem::transmute(sym_read),
-            simple_free: std::mem::transmute(sym_free),
+            simple_new: std::mem::transmute::<*mut c_void, PaSimpleNewFn>(sym_new),
+            simple_read: std::mem::transmute::<*mut c_void, PaSimpleReadFn>(sym_read),
+            simple_free: std::mem::transmute::<*mut c_void, PaSimpleFreeFn>(sym_free),
         })
     }
 }
 
+#[allow(clippy::unnecessary_cast)]
 fn monotonic_ticks_100ns() -> i64 {
     unsafe {
         let mut ts = libc::timespec {

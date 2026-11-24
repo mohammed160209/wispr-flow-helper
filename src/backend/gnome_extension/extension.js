@@ -116,7 +116,7 @@ function windowInfo(win) {
 // 1.6.1264, `Wispr Flow` since) and `Scratchpad` are the only Wispr Flow
 // windows meant to be real, user-facing taskbar entries.
 const WISPR_WM_CLASS = 'wispr-flow';
-const WISPR_TASKBAR_TITLES = new Set(['Hub', 'Wispr Flow', 'Scratchpad', 'Meeting Recorder']);
+const WISPR_TASKBAR_TITLES = new Set(['Hub', 'Flow Hub', 'Wispr Flow', 'Scratchpad', 'Meeting Recorder']);
 
 // Mutter made hide_from_window_list(), show_in_window_list() and set_type()
 // public on Meta.Window only in 49. GNOME 45-48 have none of them, so there
@@ -140,8 +140,8 @@ const CAN_SET_TYPE = typeof Meta.Window.prototype.set_type === 'function';
 // wl-clipboard's surface, which then waits for focus forever and hangs copy
 // and paste. Keep the pill above only while its window is no bigger than
 // this; linux-status-compact.sh in the app repo makes it 200x110.
-const STATUS_ABOVE_MAX_WIDTH = 1600;
-const STATUS_ABOVE_MAX_HEIGHT = 1600;
+const STATUS_ABOVE_MAX_WIDTH = 256;
+const STATUS_ABOVE_MAX_HEIGHT = 160;
 
 // Re-snap tolerance: skip re-positioning if we're already within this many
 // pixels of the target, so our own `position-changed` handler doesn't loop
@@ -404,7 +404,8 @@ export default class WindowBridgeExtension extends Extension {
                 this._restoreWindow(win);
                 return;
             }
-            if (!this._auxSaved.has(win)) {
+            const isOR = win.is_override_redirect?.() ?? false;
+            if (!isOR && !this._auxSaved.has(win)) {
                 this._auxSaved.set(win, {
                     type: win.get_window_type(),
                     above: win.is_above(),
@@ -412,46 +413,52 @@ export default class WindowBridgeExtension extends Extension {
                     skipTaskbar: win.is_skip_taskbar(),
                 });
             }
-            // This sets the flag behind both is_skip_taskbar() and the
-            // read-only `skip-taskbar` property the Overview reads.
-            if (CAN_HIDE_FROM_WINDOW_LIST)
-                win.hide_from_window_list();
-            // Wispr Flow's overlay windows are already asked (from the
-            // Electron side) to appear on every workspace; Wayland ignores
-            // that request for the same reason it ignores skip-taskbar, so
-            // mirror it here too rather than leaving the pill workspace-
-            // bound.
-            win.stick();
-            // Electron's `type: "toolbar"` BrowserWindow option is X11-only
-            // and does nothing on Wayland, so Mutter classifies the pill as
-            // an ordinary Meta.WindowType.NORMAL toplevel. A NORMAL window's
-            // always-on-top state is still subject to Mutter's normal
-            // focus/stacking rules, so the "always on top" status pill can
-            // end up rendered *behind* whatever window has focus -- from the
-            // user's perspective, the push-to-talk indicator never appears.
-            // UTILITY windows are stacked/raised independently of focus
-            // changes to the main application, matching what this window
-            // actually is.
-            if (CAN_SET_TYPE)
-                win.set_type(Meta.WindowType.UTILITY);
-            // Only the status pill is kept above other windows. The other
-            // auxiliary windows (the work-area-sized context menu overlay)
-            // would take focus from every new window under them, and a
-            // misclassified main window would sit on top of everything.
-            if (isStatusTitle(win.get_title()) &&
-                !this._aboveWatched.has(win)) {
-                this._aboveWatched.add(win);
-                this._connectWin(win, 'size-changed', () =>
-                    this._updateStatusAbove(win)
-                );
-                // Deferred: an above state set while the window is still
-                // mapping does not stick.
-                const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                    this._idleIds.delete(id);
-                    this._updateStatusAbove(win);
-                    return GLib.SOURCE_REMOVE;
-                });
-                this._idleIds.add(id);
+            // Override-redirect XWayland windows are already unmanaged by the
+            // WM (never in taskbars, already in top_window_group on every
+            // workspace); calling stick()/make_above()/set_type() on them only
+            // trips Mutter's `!window->override_redirect` CRITICAL assertions.
+            if (!isOR) {
+                // This sets the flag behind both is_skip_taskbar() and the
+                // read-only `skip-taskbar` property the Overview reads.
+                if (CAN_HIDE_FROM_WINDOW_LIST)
+                    win.hide_from_window_list();
+                // Wispr Flow's overlay windows are already asked (from the
+                // Electron side) to appear on every workspace; Wayland ignores
+                // that request for the same reason it ignores skip-taskbar, so
+                // mirror it here too rather than leaving the pill workspace-
+                // bound.
+                win.stick();
+                // Electron's `type: "toolbar"` BrowserWindow option is X11-only
+                // and does nothing on Wayland, so Mutter classifies the pill as
+                // an ordinary Meta.WindowType.NORMAL toplevel. A NORMAL window's
+                // always-on-top state is still subject to Mutter's normal
+                // focus/stacking rules, so the "always on top" status pill can
+                // end up rendered *behind* whatever window has focus -- from the
+                // user's perspective, the push-to-talk indicator never appears.
+                // UTILITY windows are stacked/raised independently of focus
+                // changes to the main application, matching what this window
+                // actually is.
+                if (CAN_SET_TYPE)
+                    win.set_type(Meta.WindowType.UTILITY);
+                // Only the status pill is kept above other windows. The other
+                // auxiliary windows (the work-area-sized context menu overlay)
+                // would take focus from every new window under them, and a
+                // misclassified main window would sit on top of everything.
+                if (isStatusTitle(win.get_title()) &&
+                    !this._aboveWatched.has(win)) {
+                    this._aboveWatched.add(win);
+                    this._connectWin(win, 'size-changed', () =>
+                        this._updateStatusAbove(win)
+                    );
+                    // Deferred: an above state set while the window is still
+                    // mapping does not stick.
+                    const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                        this._idleIds.delete(id);
+                        this._updateStatusAbove(win);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                    this._idleIds.add(id);
+                }
             }
 
             // The dictation status pill specifically: pin it bottom-center.
@@ -502,9 +509,6 @@ export default class WindowBridgeExtension extends Extension {
                     this._pinStatusBottomCenter(win)
                 );
                 this._statusWins.add(win);
-                this._connectWin(win, 'unmanaged', () =>
-                    this._statusWins.delete(win)
-                );
                 // Re-evaluate if the pill lands on a different monitor.
                 this._connectWin(win, 'position-changed', () =>
                     this._updateClickThrough(win)
@@ -529,6 +533,8 @@ export default class WindowBridgeExtension extends Extension {
     // which is the lesser problem.
     _updateStatusAbove(win) {
         try {
+            if (win.is_override_redirect?.())
+                return;
             const saved = this._auxSaved.get(win);
             // Gone or retitled as a real window.
             if (!saved)
@@ -585,6 +591,8 @@ export default class WindowBridgeExtension extends Extension {
         if (!saved)
             return;
         this._auxSaved.delete(win);
+        if (win.is_override_redirect?.())
+            return;
         try {
             if (!saved.above && win.is_above())
                 win.unmake_above();
@@ -622,6 +630,8 @@ export default class WindowBridgeExtension extends Extension {
         this._auxSaved.delete(win);
         this._aboveWatched.delete(win);
         this._statusWired.delete(win);
+        this._statusWins?.delete(win);
+        this._clickThroughSaved?.delete(win);
     }
 
     disable() {
@@ -668,12 +678,20 @@ export default class WindowBridgeExtension extends Extension {
     }
 
     _disconnectTitle() {
-        if (this._titleId && this._focusWindow) {
-            try {
-                this._focusWindow.disconnect(this._titleId);
-            } catch (e) {}
+        if (this._focusWindow) {
+            if (this._titleId) {
+                try {
+                    this._focusWindow.disconnect(this._titleId);
+                } catch (e) {}
+            }
+            if (this._focusUnmanagedId) {
+                try {
+                    this._focusWindow.disconnect(this._focusUnmanagedId);
+                } catch (e) {}
+            }
         }
         this._titleId = 0;
+        this._focusUnmanagedId = 0;
     }
 
     _onFocusChanged() {
@@ -687,6 +705,12 @@ export default class WindowBridgeExtension extends Extension {
                 this._titleId = win.connect('notify::title', () =>
                     this._emitFocus()
                 );
+                this._focusUnmanagedId = win.connect('unmanaged', () => {
+                    if (this._focusWindow === win) {
+                        this._disconnectTitle();
+                        this._focusWindow = null;
+                    }
+                });
             }
         }
 
@@ -741,9 +765,14 @@ export default class WindowBridgeExtension extends Extension {
         try {
             const ws = global.workspace_manager.get_active_workspace();
             const time = global.get_current_time();
-            for (const actor of global.get_window_actors()) {
-                const win = actor.meta_window;
-                if (!win || win.get_wm_class() !== WISPR_WM_CLASS)
+            const actors = global.get_window_actors();
+            for (let i = actors.length - 1; i >= 0; i--) {
+                const win = actors[i]?.meta_window;
+                if (!win || win.is_override_redirect?.())
+                    continue;
+                if (win.window_type !== Meta.WindowType.NORMAL)
+                    continue;
+                if (win.get_wm_class() !== WISPR_WM_CLASS)
                     continue;
                 if ((win.get_title() ?? '') !== title)
                     continue;

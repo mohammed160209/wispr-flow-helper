@@ -16,6 +16,7 @@ mod capture;
 mod keymap;
 mod proto;
 mod system_audio;
+mod xshape_input;
 
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
@@ -79,6 +80,11 @@ fn main() {
 
     if std::env::args().any(|a| a == "--capture-system-audio") {
         system_audio::run_capture_system_audio();
+        return;
+    }
+
+    if std::env::args().any(|a| a == "--xshape-input") {
+        xshape_input::run_xshape_input();
         return;
     }
 
